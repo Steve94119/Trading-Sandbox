@@ -1,12 +1,13 @@
 import sys
 
-from PyQt5.QtWidgets import QApplication, QMainWindow
+from PyQt5.QtWidgets import QApplication
+
+from src.gui.main_window import MainWindow
 
 
-def main():
+def main() -> None:
     app = QApplication(sys.argv)
-    window = QMainWindow()
-    window.setWindowTitle("Trading Sandbox")
+    window = MainWindow()
     window.show()
     sys.exit(app.exec_())
 
