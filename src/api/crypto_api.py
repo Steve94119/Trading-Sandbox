@@ -36,6 +36,29 @@ def get_crypto_rates(coin_ids: List[str] = ["90", "80", "2"]) -> Dict[str, Dict[
     return result
 
 
+def get_top_crypto(limit: int = 20) -> List[Dict[str, float | str]]:
+    url = f"{BASE_URL}/api/tickers/"
+
+    try:
+        resp = requests.get(url, timeout=DEFAULT_TIMEOUT)
+        resp.raise_for_status()
+        payload = resp.json()
+    except RequestException as e:
+        raise RuntimeError(f"Не удалось получить список криптовалют: {e}") from e
+    except ValueError as e:
+        raise RuntimeError("Не удалось декодировать ответ") from e
+
+    items = payload.get("data", []) if isinstance(payload, dict) else payload
+    result = []
+    for item in items[:limit]:
+        result.append({
+            "id": str(item.get("id", "")),
+            "symbol": item.get("symbol", ""),
+            "name": item.get("name", ""),
+        })
+    return result
+
+
 def get_crypto_history(coin_id: str, days: int = 7) -> List[Dict[str, float | int | str]]:
     url = f"{BASE_URL}/api/coin/ohlcv/"
 
@@ -75,3 +98,4 @@ if __name__ == "__main__":
     # Тут у меня просто тесты(они не вызываются при импорте из других модулей)
     print(get_crypto_rates())
     print(get_crypto_history(coin_id="90", days=7))
+    print(get_top_crypto(20))
