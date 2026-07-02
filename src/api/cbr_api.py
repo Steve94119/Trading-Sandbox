@@ -1,88 +1,82 @@
-from datetime import datetime, timedelta
-from typing import Dict, List
+from datetime import datetime
 from xml.etree import ElementTree
 
 import requests
-from requests import RequestException
 
-BASE_URL = "http://www.cbr.ru/scripts"
-DEFAULT_TIMEOUT = 10
-CACHE_TTL = timedelta(hours=1)
-
-cache_data = None
-cache_time = None
+from config import CBR_BASE_URL, CBR_CACHE_TTL, API_TIMEOUT_SEC
 
 
-def get_currency_rates(date=None) -> Dict[str, Dict[str, float | int | str]]:
-    global cache_data, cache_time
-
-    if date is None and cache_data is not None and cache_time is not None:
-        if datetime.now() - cache_time < CACHE_TTL:
-            return cache_data
-
-    params = {}
-    if date is not None:
-        params["date_req"] = format_date(date)
-
-    try:
-        resp = requests.get(f"{BASE_URL}/XML_daily.asp", params=params, timeout=DEFAULT_TIMEOUT)
-        resp.raise_for_status()
-        root = ElementTree.fromstring(resp.content)
-    except RequestException as e:
-        raise RuntimeError(f"Не удалось получить курсы валют ЦБ: {e}") from e
-    except ElementTree.ParseError as e:
-        raise RuntimeError("Не удалось разобрать XML") from e
-
-    result = {}
-    for item in root.findall("Valute"):
-        code = item.findtext("CharCode", default="")
-        if not code:
-            continue
-        result[code] = {
-            "name": item.findtext("Name", default=""),
-            "value": float(item.findtext("Value", default="0").replace(",", ".")),
-            "nominal": int(item.findtext("Nominal", default="1")),
-        }
-
-    if date is None:
-        cache_data = result
-        cache_time = datetime.now()
-
-    return result
-
-
-def get_currency_history(currency_code, from_date, to_date) -> List[Dict[str, float | str]]:
-    params = {
-        "VAL_NM_RQ": currency_code,
-        "date_req1": format_date(from_date),
-        "date_req2": format_date(to_date),
-    }
-
-    try:
-        resp = requests.get(f"{BASE_URL}/XML_dynamic.asp", params=params, timeout=DEFAULT_TIMEOUT)
-        resp.raise_for_status()
-        root = ElementTree.fromstring(resp.content)
-    except RequestException as e:
-        raise RuntimeError(f"Не удалось получить историю валюты ЦБ: {e}") from e
-    except ElementTree.ParseError as e:
-        raise RuntimeError("Не удалось разобрать XML") from e
-
-    result = []
-    for item in root.findall("Record"):
-        result.append({
-            "date": item.attrib.get("Date", ""),
-            "value": float(item.findtext("Value", default="0").replace(",", ".")),
-        })
-    return result
-
-
-def format_date(value) -> str:
+def _format_date(value) -> str:
     if isinstance(value, datetime):
         return value.strftime("%d/%m/%Y")
     return value
 
 
-if __name__ == "__main__":
-    # Тут у меня просто тесты(они не вызываются при импорте из других модулей)
-    print(get_currency_rates())
-    print(get_currency_history("R01235", "01/06/2026", "30/06/2026"))
+class CBRApi:
+    def __init__(self, base_url: str = CBR_BASE_URL, timeout: int = API_TIMEOUT_SEC,
+                 cache_ttl=None) -> None:
+        self.base_url = base_url
+        self.timeout = timeout
+        self.cache_ttl = cache_ttl or CBR_CACHE_TTL
+        self._cache = None
+        self._cache_time = None
+
+    def get_currency_rates(self, date=None) -> dict:
+        if date is None and self._is_cache_fresh():
+            return self._cache
+
+        params = {} if date is None else {"date_req": _format_date(date)}
+
+        try:
+            resp = requests.get(f"{self.base_url}/XML_daily.asp",
+                                params=params, timeout=self.timeout)
+            resp.raise_for_status()
+            root = ElementTree.fromstring(resp.content)
+        except requests.RequestException as e:
+            raise RuntimeError(f"Не удалось получить курсы валют ЦБ: {e}") from e
+        except ElementTree.ParseError as e:
+            raise RuntimeError("Не удалось разобрать XML") from e
+
+        result = {}
+        for item in root.findall("Valute"):
+            code = item.findtext("CharCode", default="")
+            if not code:
+                continue
+            result[code] = {
+                "name": item.findtext("Name", default=""),
+                "value": float(item.findtext("Value", default="0").replace(",", ".")),
+                "nominal": int(item.findtext("Nominal", default="1")),
+            }
+
+        if date is None:
+            self._cache = result
+            self._cache_time = datetime.now()
+        return result
+
+    def get_currency_history(self, currency_code, from_date, to_date) -> list:
+        params = {
+            "VAL_NM_RQ": currency_code,
+            "date_req1": _format_date(from_date),
+            "date_req2": _format_date(to_date),
+        }
+        try:
+            resp = requests.get(f"{self.base_url}/XML_dynamic.asp",
+                                params=params, timeout=self.timeout)
+            resp.raise_for_status()
+            root = ElementTree.fromstring(resp.content)
+        except requests.RequestException as e:
+            raise RuntimeError(f"Не удалось получить историю валюты ЦБ: {e}") from e
+        except ElementTree.ParseError as e:
+            raise RuntimeError("Не удалось разобрать XML") from e
+
+        return [
+            {
+                "date": item.attrib.get("Date", ""),
+                "value": float(item.findtext("Value", default="0").replace(",", ".")),
+            }
+            for item in root.findall("Record")
+        ]
+
+    def _is_cache_fresh(self) -> bool:
+        return (self._cache is not None and self._cache_time is not None
+                and datetime.now() - self._cache_time < self.cache_ttl)

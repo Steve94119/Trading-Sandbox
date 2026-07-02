@@ -1,8 +1,8 @@
+import sqlite3
 from datetime import datetime, timedelta
 
-import sqlite3
 from PyQt5 import QtCore
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
+from PyQt5.QtCore import Qt, QTimer, QObject, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -22,47 +22,22 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from config import (
+    CBR_CODES_20,
+    CBR_HISTORY_DAYS,
+    CBR_HISTORY_IDS,
+    CHART_HISTORY_DAYS,
+    CLOCK_TICK_MS,
+    CRYPTO_LIMIT,
+    DB_HISTORY_LIMIT,
+    DEFAULT_CRYPTO_IDS,
+    FALLBACK_CRYPTO,
+    REFRESH_INTERVAL_MS,
+    START_BALANCE,
+)
 from src.api import cbr_api, crypto_api
-from src.models.trading_sandbox import Order, TradingEngine, VirtualPortfolio
-from src.utils.chart import PriceChart
-from src.utils.database import DatabaseManager
-
-CBR_CODES_20 = [
-    "USD", "EUR", "CNY", "GBP", "JPY", "CHF", "KZT", "BYN", "TRY", "INR",
-    "AUD", "CAD", "HKD", "KGS", "MDL", "NOK", "PLN", "SEK", "CZK", "KRW",
-]
-CBR_HISTORY_IDS = {
-    "USD": "R01235", "EUR": "R01239", "GBP": "R01010", "JPY": "R01820",
-    "CHF": "R01775", "CNY": "R01375", "KZT": "R01335", "BYN": "R01090",
-    "TRY": "R01720", "INR": "R01270", "AUD": "R01060", "CAD": "R01350",
-    "HKD": "R01200", "KGS": "R01370", "MDL": "R01500", "NOK": "R01535",
-    "PLN": "R01565", "SEK": "R01570", "CZK": "R01660", "KRW": "R01610",
-}
-CRYPTO_LIMIT = 20
-REFRESH_INTERVAL = 30000
-
-FALLBACK_CRYPTO = [
-    {"id": "90", "symbol": "BTC", "name": "Bitcoin"},
-    {"id": "80", "symbol": "ETH", "name": "Ethereum"},
-    {"id": "518", "symbol": "USDT", "name": "Tether"},
-    {"id": "2710", "symbol": "BNB", "name": "BNB"},
-    {"id": "33285", "symbol": "USDC", "name": "USD Coin"},
-    {"id": "58", "symbol": "LTC", "name": "Litecoin"},
-    {"id": "48543", "symbol": "SOL", "name": "Solana"},
-    {"id": "2713", "symbol": "TRX", "name": "TRON"},
-    {"id": "148109", "symbol": "AVAX", "name": "Avalanche"},
-    {"id": "158405", "symbol": "MATIC", "name": "Polygon"},
-    {"id": "46971", "symbol": "DOT", "name": "Polkadot"},
-    {"id": "2", "symbol": "DOGE", "name": "Dogecoin"},
-    {"id": "33833", "symbol": "LINK", "name": "Chainlink"},
-    {"id": "33422", "symbol": "NEAR", "name": "Near Protocol"},
-    {"id": "134", "symbol": "XRP", "name": "XRP"},
-    {"id": "89", "symbol": "BCH", "name": "Bitcoin Cash"},
-    {"id": "65945", "symbol": "ATOM", "name": "Cosmos"},
-    {"id": "96901", "symbol": "ICP", "name": "Internet Computer"},
-    {"id": "28", "symbol": "XMR", "name": "Monero"},
-    {"id": "257", "symbol": "ETC", "name": "Ethereum Classic"},
-]  # fallback на случай сбоя /api/tickers/
+from src.models import Order, TradingEngine, VirtualPortfolio
+from src.utils import DatabaseManager, PriceChart
 
 
 class RatesService(QObject):
@@ -72,7 +47,7 @@ class RatesService(QObject):
 
     def __init__(self) -> None:
         super().__init__()
-        self.crypto_ids: list[str] = ["90", "80", "2"]
+        self.crypto_ids: list[str] = list(DEFAULT_CRYPTO_IDS)
 
     def fetch_all(self) -> None:
         meta: list[dict] = []
@@ -87,8 +62,8 @@ class RatesService(QObject):
             self.crypto_ids = [m["id"] for m in meta]
 
         if not self.crypto_ids:
+            self.crypto_ids = [m["id"] for m in FALLBACK_CRYPTO]
             meta = list(FALLBACK_CRYPTO)
-            self.crypto_ids = [m["id"] for m in meta]
 
         try:
             cbr_data = cbr_api.get_currency_rates()
@@ -109,16 +84,23 @@ class RatesService(QObject):
             if kind == "cbr":
                 today = datetime.now()
                 data = cbr_api.get_currency_history(
-                    asset, (today - timedelta(days=30)).strftime("%d/%m/%Y"),
+                    asset,
+                    (today - timedelta(days=CBR_HISTORY_DAYS)).strftime("%d/%m/%Y"),
                     today.strftime("%d/%m/%Y"),
                 )
             else:
-                data = crypto_api.get_crypto_history(asset, days=7)
+                data = crypto_api.get_crypto_history(asset, days=CHART_HISTORY_DAYS)
         except RuntimeError as e:
             self.error.emit(str(e))
             data = []
 
         self.history_ready.emit(asset, data, kind, display_name)
+
+
+def _format_cell(value) -> str:
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    return str(value)
 
 
 class MainWindow(QMainWindow):
@@ -127,7 +109,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Trading Sandbox")
         self.resize(1100, 700)
 
-        self.portfolio = VirtualPortfolio()
+        self.portfolio = VirtualPortfolio(START_BALANCE)
         self.engine = TradingEngine(self.portfolio)
         self.db = DatabaseManager()
         self.service = RatesService()
@@ -137,7 +119,7 @@ class MainWindow(QMainWindow):
 
         self.cbr_prices: dict = {}
         self.crypto_prices: dict = {}
-        self.crypto_meta: list[tuple[str, dict]] = []
+        self.crypto_meta: list = []
         self.last_update = None
         self.selected_row_cbr = -1
         self.selected_row_crypto = -1
@@ -149,18 +131,16 @@ class MainWindow(QMainWindow):
 
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self._refresh_all)
-        self.refresh_timer.start(REFRESH_INTERVAL)
+        self.refresh_timer.start(REFRESH_INTERVAL_MS)
 
         self.clock_timer = QTimer(self)
         self.clock_timer.timeout.connect(self._tick_clock)
-        self.clock_timer.start(1000)
+        self.clock_timer.start(CLOCK_TICK_MS)
 
         QtCore.QTimer.singleShot(0, self._refresh_all)
 
     def _build_menu(self) -> None:
-        menu_bar = self.menuBar()
-
-        file_menu = menu_bar.addMenu("Файл")
+        file_menu = self.menuBar().addMenu("Файл")
         export_action = QAction("Экспорт CSV", self)
         export_action.triggered.connect(self._export_csv)
         file_menu.addAction(export_action)
@@ -169,8 +149,6 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
-        menu_bar.addMenu("Настройки")
-
     def _build_tabs(self) -> None:
         tabs = QTabWidget()
         tabs.addTab(self._build_currencies_tab(), "Валюты")
@@ -178,68 +156,60 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_portfolio_tab(), "Портфель")
         self.setCentralWidget(tabs)
 
+    def _build_market_tab(self, table_attr: str, headers: list[str], chart_title_hint: str):
+        def build():
+            widget = QWidget()
+            layout = QVBoxLayout(widget)
+
+            table = QTableWidget(0, len(headers))
+            table.setHorizontalHeaderLabels(headers)
+            table.verticalHeader().setVisible(False)
+            table.setAlternatingRowColors(True)
+            table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            table.setSelectionMode(QAbstractItemView.SingleSelection)
+            layout.addWidget(table)
+            setattr(self, table_attr, table)
+
+            chart = PriceChart()
+            chart.plot.setTitle(chart_title_hint, color="#888", size="10pt")
+            layout.addWidget(chart, stretch=1)
+            # сохранить ссылку на график
+            if table_attr == "cbr_table":
+                self.cbr_chart = chart
+            else:
+                self.crypto_chart = chart
+
+            btn_row = QHBoxLayout()
+            market_code = "cbr" if table_attr == "cbr_table" else "crypto"
+            for label, side in (("Купить", "buy"), ("Продать", "sell")):
+                btn = QPushButton(label)
+                btn.clicked.connect(lambda _=False, m=market_code, s=side: self._make_trade(m, s))
+                btn_row.addWidget(btn)
+            btn_row.addStretch()
+            layout.addLayout(btn_row)
+
+            return widget
+        return build
+
     def _build_currencies_tab(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-
-        self.cbr_table = QTableWidget(0, 5)
-        self.cbr_table.setHorizontalHeaderLabels(
-            ["Код", "Название", "Цена (RUB)", "Номинал", "Курс за 1"]
+        builder = self._build_market_tab(
+            "cbr_table",
+            ["Код", "Название", "Цена (RUB)", "Номинал", "Курс за 1"],
+            "Выбери валюту, кликнув по строке",
         )
-        self.cbr_table.verticalHeader().setVisible(False)
-        self.cbr_table.setAlternatingRowColors(True)
-        self.cbr_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.cbr_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.cbr_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        widget = builder()
         self.cbr_table.cellClicked.connect(self._on_cbr_row_clicked)
-        layout.addWidget(self.cbr_table)
-
-        self.cbr_chart = PriceChart()
-        self.cbr_chart.plot.setTitle("Выбери валюту, кликнув по строке", color="#888", size="10pt")
-        layout.addWidget(self.cbr_chart, stretch=1)
-
-        btn_row = QHBoxLayout()
-        buy_btn = QPushButton("Купить")
-        buy_btn.clicked.connect(lambda: self._make_trade("cbr", "buy"))
-        sell_btn = QPushButton("Продать")
-        sell_btn.clicked.connect(lambda: self._make_trade("cbr", "sell"))
-        btn_row.addWidget(buy_btn)
-        btn_row.addWidget(sell_btn)
-        btn_row.addStretch()
-        layout.addLayout(btn_row)
-
         return widget
 
     def _build_crypto_tab(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-
-        self.crypto_table = QTableWidget(0, 5)
-        self.crypto_table.setHorizontalHeaderLabels(
-            ["Тикер", "Название", "Цена (RUB)", "1ч %", "24ч %"]
+        builder = self._build_market_tab(
+            "crypto_table",
+            ["Тикер", "Название", "Цена (RUB)", "1ч %", "24ч %"],
+            "Выбери монету, кликнув по строке",
         )
-        self.crypto_table.verticalHeader().setVisible(False)
-        self.crypto_table.setAlternatingRowColors(True)
-        self.crypto_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.crypto_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.crypto_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        widget = builder()
         self.crypto_table.cellClicked.connect(self._on_crypto_row_clicked)
-        layout.addWidget(self.crypto_table)
-
-        self.crypto_chart = PriceChart()
-        self.crypto_chart.plot.setTitle("Выбери монету, кликнув по строке", color="#888", size="10pt")
-        layout.addWidget(self.crypto_chart, stretch=1)
-
-        btn_row = QHBoxLayout()
-        buy_btn = QPushButton("Купить")
-        buy_btn.clicked.connect(lambda: self._make_trade("crypto", "buy"))
-        sell_btn = QPushButton("Продать")
-        sell_btn.clicked.connect(lambda: self._make_trade("crypto", "sell"))
-        btn_row.addWidget(buy_btn)
-        btn_row.addWidget(sell_btn)
-        btn_row.addStretch()
-        layout.addLayout(btn_row)
-
         return widget
 
     def _build_portfolio_tab(self) -> QWidget:
@@ -371,33 +341,26 @@ class MainWindow(QMainWindow):
         if kind == "crypto":
             prices = [p * rate for p in prices]
         dates = [str(row.get("date", "")) for row in data]
-        if kind == "cbr":
-            self.cbr_chart.set_data(prices, dates, display_name)
-        else:
-            self.crypto_chart.set_data(prices, dates, display_name)
+        chart = self.cbr_chart if kind == "cbr" else self.crypto_chart
+        chart.set_data(prices, dates, display_name)
 
     def _usd_rate(self) -> float:
-        usd_info = self.cbr_prices.get("USD")
-        if usd_info is None:
+        info = self.cbr_prices.get("USD")
+        if info is None:
             return 0.0
-        nominal = usd_info.get("nominal") or 1
-        return usd_info["value"] / nominal
+        return info["value"] / (info.get("nominal") or 1)
 
     def _fill_cbr_table(self) -> None:
-        rows = []
-        for code in CBR_CODES_20:
-            info = self.cbr_prices.get(code)
-            if info is None:
-                continue
-            rows.append((
-                code, info["name"], info["value"], info["nominal"],
-                info["value"] / info["nominal"],
-            ))
+        rows = [
+            (code, info["name"], info["value"], info["nominal"],
+             info["value"] / info["nominal"])
+            for code in CBR_CODES_20
+            if (info := self.cbr_prices.get(code)) is not None
+        ]
         self.cbr_table.setRowCount(len(rows))
         for i, row in enumerate(rows):
             for j, val in enumerate(row):
-                text = f"{val:.4f}" if isinstance(val, float) else str(val)
-                self.cbr_table.setItem(i, j, QTableWidgetItem(text))
+                self.cbr_table.setItem(i, j, QTableWidgetItem(_format_cell(val)))
 
     def _fill_crypto_table(self) -> None:
         rate = self._usd_rate()
@@ -407,9 +370,12 @@ class MainWindow(QMainWindow):
             if info is None:
                 continue
             rows.append((
-                cid, meta.get("symbol", ""), meta.get("name", ""),
+                cid,
+                meta.get("symbol", ""),
+                meta.get("name", ""),
                 info["price_usd"] * rate,
-                info["percent_change_1h"], info["percent_change_24h"],
+                info["percent_change_1h"],
+                info["percent_change_24h"],
             ))
         self.crypto_table.setRowCount(len(rows))
         for i, (cid, symbol, name, price, p1, p24) in enumerate(rows):
@@ -426,13 +392,11 @@ class MainWindow(QMainWindow):
                 self.crypto_table.setItem(i, col, item)
 
     def _fill_history_table(self) -> None:
-        history = self.db.get_history(limit=50)
+        history = self.db.get_history(DB_HISTORY_LIMIT)
         self.history_table.setRowCount(len(history))
         for i, row in enumerate(history):
             for j, key in enumerate(["timestamp", "asset", "type", "amount", "price"]):
-                val = row.get(key, "")
-                text = f"{val:.4f}" if isinstance(val, float) else str(val)
-                self.history_table.setItem(i, j, QTableWidgetItem(text))
+                self.history_table.setItem(i, j, QTableWidgetItem(_format_cell(row.get(key, ""))))
 
     def _on_cbr_row_clicked(self, row: int, _col: int) -> None:
         self.selected_row_cbr = row
@@ -447,32 +411,20 @@ class MainWindow(QMainWindow):
         item = self.crypto_table.item(row, 0)
         if item is None:
             return
-        symbol = item.text()
         cid = item.data(Qt.UserRole)
-        self.service.fetch_history("crypto", str(cid), symbol)
+        self.service.fetch_history("crypto", str(cid), item.text())
 
     def _make_trade(self, market: str, side: str) -> None:
         if market == "cbr":
-            row = self.selected_row_cbr
-            table = self.cbr_table
-            price_col = 4
-            asset = None
+            row, table, price_col = self.selected_row_cbr, self.cbr_table, 4
         else:
-            row = self.selected_row_crypto
-            table = self.crypto_table
-            price_col = 2
-            asset = None
+            row, table, price_col = self.selected_row_crypto, self.crypto_table, 2
 
         if row < 0 or table.item(row, 0) is None:
             QMessageBox.warning(self, "Trading Sandbox", "Сначала выбери актив в таблице")
             return
 
-        if market == "cbr":
-            asset = table.item(row, 0).text()
-        else:
-            symbol_item = table.item(row, 0)
-            asset = symbol_item.text()
-
+        asset = table.item(row, 0).text()
         try:
             price = float(table.item(row, price_col).text().replace(" ", ""))
         except (ValueError, AttributeError):
@@ -487,44 +439,44 @@ class MainWindow(QMainWindow):
 
         stop_loss = take_profit = None
         if side == "buy":
-            sl_text = f"Стоп-лосс для {asset}\n(0 — без стоп-лосса):"
             sl, ok = QInputDialog.getDouble(
-                self, "Стоп-лосс", sl_text, price * 0.95, 0.0, price, 4
+                self, "Стоп-лосс",
+                f"Стоп-лосс для {asset}\n(0 — без стоп-лосса):",
+                price * 0.95, 0.0, price, 4,
             )
             if not ok:
                 return
             stop_loss = sl if sl > 0 else None
 
-            tp_text = f"Тейк-профит для {asset}\n(0 — без тейк-профита):"
             tp, ok = QInputDialog.getDouble(
-                self, "Тейк-профит", tp_text, price * 1.10, 0.0, 1e9, 4
+                self, "Тейк-профит",
+                f"Тейк-профит для {asset}\n(0 — без тейк-профита):",
+                price * 1.10, 0.0, 1e9, 4,
             )
             if not ok:
                 return
             take_profit = tp if tp > 0 else None
 
         try:
-            if side == "buy":
-                self.portfolio.buy(asset, amount, price)
-            else:
-                self.portfolio.sell(asset, amount, price)
+            (self.portfolio.buy if side == "buy" else self.portfolio.sell)(
+                asset, amount, price
+            )
         except ValueError as e:
             QMessageBox.warning(self, "Trading Sandbox", str(e))
             return
 
+        now = datetime.now().isoformat(timespec="seconds")
         self.db.save_transaction(
-            timestamp=datetime.now().isoformat(timespec="seconds"),
-            asset=asset, type_=market, side=side,
+            timestamp=now, asset=asset, type_=market, side=side,
             amount=amount, price=price, total=amount * price,
         )
 
         if side == "buy" and (stop_loss or take_profit):
-            order = Order(
-                asset=asset, order_type=market, side=side,
+            self.engine.add_order(Order(
+                asset=asset, market=market, side=side,
                 amount=amount, price=price,
                 stop_loss=stop_loss, take_profit=take_profit,
-            )
-            self.engine.add_order(order)
+            ))
             self.db.save_order(
                 asset=asset, type_=market, side=side, amount=amount,
                 price=price, stop_loss=stop_loss, take_profit=take_profit,
@@ -533,19 +485,12 @@ class MainWindow(QMainWindow):
 
         self._update_portfolio_view()
         self._fill_history_table()
-        self.status.showMessage(
-            f"{'Куплено' if side == 'buy' else 'Продано'} {amount} {asset} @ {price:.4f}",
-            4000,
-        )
+        verb = "Куплено" if side == "buy" else "Продано"
+        self.status.showMessage(f"{verb} {amount} {asset} @ {price:.4f}", 4000)
 
     def _check_sl_tp(self) -> None:
         prices = self._flat_prices()
-        triggered = self.engine.update_prices(prices)
-        for order in triggered:
-            try:
-                self.portfolio.sell(order.asset, order.amount, prices[order.asset])
-            except ValueError:
-                pass
+        for order in self.engine.update_prices(prices):
             self.db.save_transaction(
                 timestamp=datetime.now().isoformat(timespec="seconds"),
                 asset=order.asset, type_="sl_tp", side="sell",
@@ -559,8 +504,8 @@ class MainWindow(QMainWindow):
 
     def _update_portfolio_view(self) -> None:
         prices = self._flat_prices()
-        total = self.portfolio.get_total_value(prices)
         cash = self.portfolio.balance_usd
+        total = self.portfolio.get_total_value(prices)
         pnl = self.portfolio.get_pnl(prices)
 
         self.lbl_total.setText(f"Стоимость: {total:.2f}")
@@ -573,38 +518,32 @@ class MainWindow(QMainWindow):
         self.lbl_balance.setText(f"Баланс: {cash:.2f}")
 
         rows = [
-            (asset, h["amount"], h["avg_price"],
-             h["amount"] * prices.get(asset, h["avg_price"]))
+            (asset, h["amount"], h["avg_price"], h["amount"] * prices.get(asset, h["avg_price"]))
             for asset, h in self.portfolio.holdings.items()
         ]
         self.holdings_table.setRowCount(len(rows))
         for i, row in enumerate(rows):
             for j, val in enumerate(row):
-                text = f"{val:.4f}" if isinstance(val, float) else str(val)
-                self.holdings_table.setItem(i, j, QTableWidgetItem(text))
+                self.holdings_table.setItem(i, j, QTableWidgetItem(_format_cell(val)))
 
     def _flat_prices(self) -> dict:
         rate = self._usd_rate() or 1.0
         out = {}
         for code, info in self.cbr_prices.items():
-            nominal = info.get("nominal") or 1
-            out[code] = info["value"] / nominal
+            out[code] = info["value"] / (info.get("nominal") or 1)
         for cid, info in self.crypto_prices.items():
-            symbol = next(
-                (m.get("symbol") for c, m in self.crypto_meta if c == cid), cid,
-            )
+            symbol = next((m.get("symbol") for c, m in self.crypto_meta if c == cid), cid)
             out[symbol] = info["price_usd"] * rate
         return out
 
     def _save_snapshot(self) -> None:
         prices = self._flat_prices()
         total = self.portfolio.get_total_value(prices)
-        assets_value = total - self.portfolio.balance_usd
         self.db.save_snapshot(
             timestamp=datetime.now().isoformat(timespec="seconds"),
             total_value=total,
             cash=self.portfolio.balance_usd,
-            assets_value=assets_value,
+            assets_value=total - self.portfolio.balance_usd,
         )
         self.status.showMessage("Снимок портфеля сохранён", 3000)
 
@@ -624,6 +563,4 @@ class MainWindow(QMainWindow):
         if self.last_update is None:
             self.lbl_updated.setText("Обновлено: —")
         else:
-            self.lbl_updated.setText(
-                f"Обновлено: {self.last_update:%H:%M:%S}"
-            )
+            self.lbl_updated.setText(f"Обновлено: {self.last_update:%H:%M:%S}")

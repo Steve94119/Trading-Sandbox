@@ -1,10 +1,8 @@
 import csv
 import sqlite3
 from pathlib import Path
-from typing import Dict, List
 
-
-DB_PATH = Path("data/trading_sandbox.db")
+from config import DB_PATH
 
 
 class DatabaseManager:
@@ -20,8 +18,7 @@ class DatabaseManager:
 
     def _init_tables(self) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """
+            conn.executescript("""
                 CREATE TABLE IF NOT EXISTS transactions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
@@ -31,22 +28,14 @@ class DatabaseManager:
                     amount REAL NOT NULL,
                     price REAL NOT NULL,
                     total REAL NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
+                );
                 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
                     total_value REAL NOT NULL,
                     cash REAL NOT NULL,
                     assets_value REAL NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
+                );
                 CREATE TABLE IF NOT EXISTS orders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     asset TEXT NOT NULL,
@@ -57,9 +46,8 @@ class DatabaseManager:
                     stop_loss REAL,
                     take_profit REAL,
                     status TEXT NOT NULL
-                )
-                """
-            )
+                );
+            """)
             conn.commit()
 
     def save_transaction(self, timestamp: str, asset: str, type_: str, side: str,
@@ -95,7 +83,7 @@ class DatabaseManager:
             conn.commit()
             return cur.lastrowid
 
-    def get_history(self, limit: int = 100) -> List[Dict]:
+    def get_history(self, limit: int = 100) -> list:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM transactions ORDER BY id DESC LIMIT ?",
@@ -103,29 +91,12 @@ class DatabaseManager:
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def get_portfolio_state(self) -> Dict:
-        with self._connect() as conn:
-            snapshot = conn.execute(
-                "SELECT * FROM portfolio_snapshots ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            if snapshot is None:
-                return {"total_value": 0.0, "cash": 0.0, "assets_value": 0.0}
-            return dict(snapshot)
-
     def export_to_csv(self, table: str, file_path: str) -> None:
         with self._connect() as conn:
             rows = conn.execute(f"SELECT * FROM {table}").fetchall()
             if not rows:
                 return
-            keys = rows[0].keys()
             with open(file_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=keys)
+                writer = csv.DictWriter(f, fieldnames=rows[0].keys())
                 writer.writeheader()
                 writer.writerows(dict(row) for row in rows)
-
-
-if __name__ == "__main__":
-    # Тут у меня просто тесты(они не вызываются при импорте из других модулей)
-    db = DatabaseManager()
-    print(db.get_portfolio_state())
-    print(db.get_history())
